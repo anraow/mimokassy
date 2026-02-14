@@ -3,11 +3,11 @@ from fastapi import FastAPI, Request
 from aiogram.types import Update, BotCommand
 from contextlib import asynccontextmanager
 
-from models.models import Session, SessionLocal
-from handlers.handlers import check_order_timeouts
-from handlers.handlers import router
-from loader import bot, dp, logger
-from config import *
+from app.models.models import Session, SessionLocal
+from app.handlers.handlers import check_order_timeouts
+from app.handlers.handlers import router
+from app.loader import bot, dp, logger
+from app.config import *
 
 app = FastAPI()
 

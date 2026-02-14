@@ -5,15 +5,14 @@ from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery
 from aiogram import F, Router
 
-from models.models import SessionLocal
-from models.models import User, Store, Category, Staff, Order
-from loader import bot, logger
+from app.models.models import SessionLocal
+from app.models.models import User, Store, Category, Staff, Order
+from app.loader import bot, logger
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timedelta
 from sqlalchemy import select
 from typing import Union
-import asyncio
 
 router = Router(name = __name__)
 

@@ -3,7 +3,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
-from config import *
+from app.config import *
 
 engine = create_engine(DATABASE_URL)
 base = declarative_base()
