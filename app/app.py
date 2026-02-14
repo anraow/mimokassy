@@ -2,7 +2,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, Request
 from aiogram.types import Update, BotCommand
 from contextlib import asynccontextmanager
-import uvicorn
 
 from models.models import Session, SessionLocal
 from handlers.handlers import check_order_timeouts
