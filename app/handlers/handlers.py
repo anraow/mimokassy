@@ -573,9 +573,10 @@ async def accept_order(c: CallbackQuery, state: FSMContext):
             builder = InlineKeyboardBuilder()
             builder.button(text='Заказ готов', style='primary', callback_data=f'issue_order:{order.id}')
             
+            items_list = order.items if isinstance(order.items, list) else []
             items_text = "\n".join([
                 f"• {item['name']} — {item['count']} шт." 
-                for item in order.items
+                for item in items_list
             ])
             
             await c.message.edit_text(
