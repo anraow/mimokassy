@@ -39,8 +39,10 @@ class Order(base):
     store_id = Column(Integer, nullable=False)
     items = Column(JSONB, nullable=False)
     total_price = Column(Numeric)
-    # CREATED; IN_PROGRESS; READY; COMPLETED; CANCELLED;
-    status = Column(String, nullable=False)
+    pickup_option = Column(String, nullable=False) # ASAP, 30, 45, 60, CUSTOM
+    target_ready_at = Column(DateTime, nullable=False) # 15 MINUTES DELAY FOR ASAP; + 30/45/60 MINUTES; E.G. HH:MM + DATE FOR CUSTOM
+    payment_status = Column(String, nullable=False, default='pending')
+    status = Column(String, nullable=False) # CREATED; IN_PROGRESS; READY; COMPLETED; CANCELLED;
     created_at = Column(DateTime, nullable=False)
 
 class Category(base):

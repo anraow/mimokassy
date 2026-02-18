@@ -10,17 +10,23 @@ from app.models.models import User, Store, Category, Staff, Order
 from app.loader import bot, logger
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from typing import Union
+import re
 
 router = Router(name = __name__)
+MSK = timezone(timedelta(hours=3))
 
 class OrderState(StatesGroup):
     SELECT_STORE = State()
     SELECT_ITEMS = State()
     CART = State()
+    TIME_WINDOW = State()
+    CUSTOM_TIME_INPUT = State()
+    CONFIRM_ORDER = State()
     PAYMENT = State()
+    PAYMENT_METHOD = State()
 
 class StaffState(StatesGroup):
     INCOMING_ORDER = State()
@@ -80,7 +86,7 @@ async def retry_order_handler(c: CallbackQuery, state: FSMContext):
                 return
 
             order.status = 'CREATED'
-            order.created_at = datetime.now()
+            order.created_at = datetime.now(MSK)
             session.commit()
             
             store_id = order.store_id
@@ -159,7 +165,7 @@ async def choose_store(event: Union[Message, CallbackQuery], state: FSMContext):
             for i, store in enumerate(stores, start=1):
                 msg_text += f'\n\n<b>{i}. {store.name}</b>\n{store.address} ({store.working_hours})'
 
-                status_tag = " 🟢" if store.id in active_store_ids else ""
+                status_tag = " (🟢 открыто)" if store.id in active_store_ids else ""
                 builder.button(
                     text=f'{store.name}{status_tag}', 
                     callback_data=f'store:{store.id}'
@@ -226,7 +232,7 @@ async def view_cart(c: CallbackQuery, state: FSMContext):
     cart = data.get('cart', {})
 
     if not cart:
-        await c.answer('Ваша корзина пуста.', show_alert=True)
+        await c.answer(text='Ваша корзина пуста.', show_alert=True)
     
         store_id = data.get('current_store_id')
         if store_id and "Меню:" not in (c.message.text or ""):
@@ -319,19 +325,136 @@ async def remove_from_cart(c: CallbackQuery, state: FSMContext):
         await edit_cart_mode(c, state)
 
 @router.callback_query(F.data == 'create_order')
-async def create_order(c: CallbackQuery, state: FSMContext):
+async def choose_pickup_time(c: CallbackQuery, state: FSMContext):
+    await state.set_state(OrderState.TIME_WINDOW)
+    builder = InlineKeyboardBuilder()
+    
+    try:
+        builder.add(InlineKeyboardButton(text='Ближайшее время', callback_data='set_time:asap'))
+        builder.row(
+            InlineKeyboardButton(text='30 мин', callback_data='set_time:30'),
+            InlineKeyboardButton(text='45 мин', callback_data='set_time:45'),
+            InlineKeyboardButton(text='через час', callback_data='set_time:60')
+        )
+        builder.add(InlineKeyboardButton(text='Другое время', style='primary',  callback_data='set_custom_time'))
+        builder.add(InlineKeyboardButton(text='Отменить заказ', style='danger', callback_data='cancel'))
+        builder.adjust(1, 3, 1, 1)
+        msg = 'Выберите время готовности заказа: '
+        
+        await bot.edit_message_text(
+            text=msg,
+            chat_id=c.message.chat.id,
+            message_id=c.message.message_id, 
+            reply_markup=builder.as_markup(),
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logger.error(f'Failed choose time: {e}')
+        await bot.edit_message_text(
+            text='Ошибка выбора времени. Попробуйте еще раз.',
+            chat_id=c.message.chat.id,
+            message_id=c.message.message_id
+        )
+
+@router.callback_query(lambda c: c.data.startswith('set_time:'))
+async def set_time(c: CallbackQuery, state: FSMContext):
+    timing_map = {
+        'asap': (15, 'ASAP'),
+        '30': (30, '30'),
+        '45': (45, '45'),
+        '60': (60, '60')
+    }
+    
+    key = c.data.split(':')[1]
+    minutes_offset, option = timing_map[key]
+    target_time = datetime.now(MSK) + timedelta(minutes=minutes_offset)
+    
+    await state.update_data(
+        pickup_option=option,
+        target_ready_at=target_time
+    )
+
+    await c.answer()
+    
+    await state.set_state(OrderState.PAYMENT)
+    await show_payment_methods(c, state)
+
+@router.callback_query(F.data == 'set_custom_time')
+async def set_custom_time(c: CallbackQuery, state: FSMContext):
+    await state.set_state(OrderState.CUSTOM_TIME_INPUT)
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text='Отменить заказ', style='danger', callback_data='cancel'))
+    
+    await c.message.edit_text(
+        text="Введите время в формате ЧЧ:ММ (например, 15:30):",
+        reply_markup=builder.as_markup()
+    )
+    await c.answer()
+
+@router.message(OrderState.CUSTOM_TIME_INPUT)
+async def process_custom_time(m: Message, state: FSMContext):
+    time_match = re.match(r'^([01]?[0-9]|2[0-3]):([0-5][0-9])$', m.text)
+    if not time_match:
+        await m.answer("Ошибка. Используйте формат ЧЧ:ММ (например, 14:00)")
+        return
+
+    hours, minutes = map(int, time_match.groups())
+    now = datetime.now(MSK)
+    target_time = now.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+    
+    if target_time < now:
+        target_time += timedelta(days=1)
+
+    await state.update_data(
+        pickup_option='CUSTOM',
+        target_ready_at=target_time
+    )
+    await m.answer(f"Время {m.text} принято.")
+    
+    await state.set_state(OrderState.PAYMENT)
+    await show_payment_methods(m, state)
+
+@router.callback_query(OrderState.PAYMENT)
+async def show_payment_methods(event: Union[CallbackQuery, Message], state: FSMContext):
+    await state.set_state(OrderState.PAYMENT_METHOD)
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="💳 Картой онлайн", callback_data="pay:card"),
+        InlineKeyboardButton(text="📱 СБП", callback_data="pay:sbp")
+    )
+    builder.row(InlineKeyboardButton(text="Отменить заказ", style='danger', callback_data="cancel"))
+    
+    text = "<b>Оплата заказа</b>\n\nВыберите способ оплаты для завершения оформления:"
+    
+    if isinstance(event, CallbackQuery):
+        await event.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode='HTML')
+    else:
+        await event.answer(text, reply_markup=builder.as_markup(), parse_mode='HTML')
+
+@router.callback_query(OrderState.PAYMENT_METHOD, F.data.startswith('pay:'))
+async def process_payment_prototype(c: CallbackQuery, state: FSMContext):
+    method = c.data.split(':')[1].upper()
+    await c.message.edit_text(f"🔄 Установка соединения с {method}...")
+    
+    import asyncio
+    await asyncio.sleep(1)
+    
+    await c.message.edit_text(f"✅ Оплата через {method} прошла успешно!")
+    
+    await finalize_order_creation(c, state)
+
+async def finalize_order_creation(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     cart = data.get('cart', {})
     store_id = data.get('current_store_id')
-    
-    if not cart:
-        await c.answer('Корзина пуста', show_alert=True)
-        return
+    pickup_option = data.get('pickup_option')
+    target_ready_at = data.get('target_ready_at')
     
     try:
         with SessionLocal() as session:
             total_sum = 0
-            
             for item_id, quantity in cart.items():
                 item = session.query(Category).filter(Category.id == int(item_id)).first()
                 if item:
@@ -341,9 +464,12 @@ async def create_order(c: CallbackQuery, state: FSMContext):
                 client_id=c.from_user.id, 
                 store_id=int(store_id),
                 items=cart,
-                total_price=total_sum, 
+                total_price=total_sum,
+                pickup_option=pickup_option,
+                target_ready_at=target_ready_at,
+                payment_status='PAID',
                 status='CREATED',
-                created_at=datetime.now()
+                created_at=datetime.now(MSK)
             )
             
             session.add(new_order)
@@ -353,21 +479,15 @@ async def create_order(c: CallbackQuery, state: FSMContext):
 
         await notify_staff_new_order(order_id, target_store_id)
         
-        await bot.edit_message_text(
-            text=f'<b>Заказ №{order_id} создан!</b> Мы сообщим, когда он будет готов.',            
-            chat_id=c.message.chat.id,
-            message_id=c.message.message_id,
+        await c.message.answer(
+            text=f'<b>Заказ №{order_id} успешно создан!</b>. Мы сообщим, когда он будет готов.\n',
             parse_mode='HTML'
         )
-        
-        await state.update_data(cart={})
-        await c.answer()
-        
         await state.clear()
         
     except Exception as e:
-        logger.error(f"Error inserting JSON order: {e}")
-        await c.answer("Ошибка при оформлении заказа", show_alert=True)
+        logger.error(f"Error finalizing order: {e}")
+        await c.answer("Ошибка при сохранении заказа", show_alert=True)
 
 @router.callback_query(F.data=='cancel')
 @router.message(Command('cancel'))
@@ -413,7 +533,7 @@ async def render_menu(c: CallbackQuery, state: FSMContext, store_id: str):
             
             builder.adjust(3)
             builder.row(InlineKeyboardButton(text=cart_btn_text, style='primary', callback_data='view_cart'))
-            builder.row(InlineKeyboardButton(text='Отмена', style='danger', callback_data='cancel'))
+            builder.row(InlineKeyboardButton(text='Отменить заказ', style='danger', callback_data='cancel'))
             
             await bot.edit_message_text(
                 text=msg,
@@ -553,10 +673,12 @@ async def waiting_for_orders(c: CallbackQuery, state: FSMContext):
 @router.callback_query(lambda c: c.data.startswith('accept_order:'))
 async def accept_order(c: CallbackQuery, state: FSMContext):
     order_id = int(c.data.split(':')[1])
+    items_text = ''
     
     try:
         with SessionLocal() as session:
             order = session.query(Order).filter(Order.id == order_id).first()
+            items = order.items
             await state.set_state(StaffState.ISSUE_ORDER)
             
             if not order:
@@ -573,14 +695,16 @@ async def accept_order(c: CallbackQuery, state: FSMContext):
             builder = InlineKeyboardBuilder()
             builder.button(text='Заказ готов', style='primary', callback_data=f'issue_order:{order.id}')
             
-            items_list = order.items if isinstance(order.items, list) else []
-            items_text = "\n".join([
-                f"• {item['name']} — {item['count']} шт." 
-                for item in items_list
-            ])
-            
+            for i, (item_id, quantity) in enumerate(order.items.items(), start=1):
+                item = session.query(Category).filter(Category.id == int(item_id)).first()
+                
+                if item:
+                    items_text += f"\n{i}. {item.name} <b>(x{quantity})</b>"
+                else:
+                    items_text += f"\n{i}. ID {item_id} <b>(x{quantity})</b>"
+                    
             await c.message.edit_text(
-                text=f"<b>Вы приняли заказ #{order_id}!</b>\nПожалуйста, приступите к выполнению.\n\n<b>Состав заказа:</b>\n{items_text}",
+                text=f"<b>Вы приняли заказ #{order_id}!</b>\nПожалуйста, приступите к выполнению.\n\n<b>Состав заказа:</b>{items_text}",
                 parse_mode='HTML',
                 reply_markup=builder.as_markup()
             )
