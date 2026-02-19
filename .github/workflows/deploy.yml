@@ -1,0 +1,29 @@
+name: Deploy Bot
+
+on:
+  push:
+    branches:
+      - main  # This triggers the deploy whenever you push to main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Execute remote ssh commands
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /opt/mimokassy
+            # Discard any local changes on server to prevent merge conflicts
+            git reset --hard origin/main
+            git pull origin main
+            # Sync dependencies
+            uv sync
+            # Restart the bot service
+            sudo systemctl restart mimokassy-host
