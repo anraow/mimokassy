@@ -4,7 +4,7 @@ from aiogram.types import Update, BotCommand
 from contextlib import asynccontextmanager
 
 from app.models.models import Session, SessionLocal
-from app.handlers.handlers import check_order_timeouts
+from app.handlers.handlers import check_order_timeouts, notify_upcoming_orders
 from app.handlers.handlers import router
 from app.loader import bot, dp, logger
 from app.config import *
@@ -30,6 +30,7 @@ async def get_db_session():
 async def on_startup():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_order_timeouts, 'interval', minutes=1)
+    scheduler.add_job(notify_upcoming_orders, 'interval', minutes=1)
     scheduler.start()
     
     await bot.set_webhook(WEBHOOK_URL)
