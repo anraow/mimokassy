@@ -11,7 +11,7 @@ from app.loader import bot, logger
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from typing import Union
 import re
 
@@ -35,11 +35,11 @@ class StaffState(StatesGroup):
 async def check_order_timeouts():
     try:
         with SessionLocal() as session:
-            threshold = datetime.now() - timedelta(minutes=15)
+            threshold = datetime.now(MSK) - timedelta(minutes=15)
             
             expired_orders = session.query(Order).filter(
                 Order.status == 'CREATED',
-                Order.created_at < threshold
+                Order.target_ready_at < threshold
             ).all()
             
             for order in expired_orders:
@@ -86,6 +86,7 @@ async def retry_order_handler(c: CallbackQuery, state: FSMContext):
                 return
 
             order.status = 'CREATED'
+            order.target_ready_at = datetime.now(MSK) + timedelta(minutes=15)
             order.created_at = datetime.now(MSK)
             session.commit()
             
@@ -96,7 +97,6 @@ async def retry_order_handler(c: CallbackQuery, state: FSMContext):
             parse_mode='HTML'
         )
         
-        await notify_staff_new_order(order_id, store_id)
         await c.answer("Заказ обновлен")
 
     except Exception as e:
@@ -439,9 +439,9 @@ async def process_payment_prototype(c: CallbackQuery, state: FSMContext):
     await c.message.edit_text(f"🔄 Установка соединения с {method}...")
     
     import asyncio
-    await asyncio.sleep(1)
+    await asyncio.sleep(1.5)
     
-    await c.message.edit_text(f"✅ Оплата через {method} прошла успешно!")
+    await c.message.edit_text(f"✅ Оплата прошла успешно!")
     
     await finalize_order_creation(c, state)
 
@@ -477,10 +477,11 @@ async def finalize_order_creation(c: CallbackQuery, state: FSMContext):
             order_id = new_order.id
             target_store_id = new_order.store_id
 
-        await notify_staff_new_order(order_id, target_store_id)
+        if pickup_option == 'ASAP':
+            await notify_staff_new_order(order_id, target_store_id)
         
         await c.message.answer(
-            text=f'<b>Заказ №{order_id} успешно создан!</b>. Мы сообщим, когда он будет готов.\n',
+            text=f'<b>Заказ №{order_id} успешно создан!</b> Мы сообщим, когда он будет готов.\n',
             parse_mode='HTML'
         )
         await state.clear()
@@ -628,13 +629,22 @@ async def waiting_for_orders(c: CallbackQuery, state: FSMContext):
     
     try:
         with SessionLocal() as session:
+            now = datetime.now(MSK)
+            alert_window = now + timedelta(minutes=15)
+            
             worker = session.query(Staff).filter(Staff.user_id == c.from_user.id).first()
             
             if worker:
                 worker.status = 'active'
                 session.commit()
                 
-            pending_orders = session.query(Order).filter(Order.status == 'CREATED').all()
+            pending_orders = session.query(Order).filter(
+                Order.status == 'CREATED',
+                or_ (
+                    Order.pickup_option == 'ASAP',
+                    Order.target_ready_at <= alert_window
+                )
+            ).order_by(Order.created_at.asc()).all()
             
             if not pending_orders:
                 builder.row(InlineKeyboardButton(text='Закончить смену', style='danger', callback_data='stop_session:'))
@@ -771,7 +781,6 @@ async def issue_order(c: CallbackQuery, state: FSMContext):
         logger.error(f"Ошибка при выдаче заказа: {e}")
         await c.answer("Ошибка базы данных.", show_alert=True)
         
-
 async def notify_staff_new_order(order_id: int, store_id: int):
     try:
         with SessionLocal() as session:
@@ -800,3 +809,21 @@ async def notify_staff_new_order(order_id: int, store_id: int):
                     
     except Exception as e:
         logger.error(f"Database error in notify_staff: {e}")
+        
+async def notify_upcoming_orders():
+    try:
+        with SessionLocal() as session:
+            now = datetime.now(MSK)
+            alert_window = now + timedelta(minutes=15)
+            
+            upcoming_orders = session.query(Order).filter(
+                Order.status == 'CREATED',
+                Order.pickup_option != 'ASAP',
+                Order.target_ready_at <= alert_window,
+                Order.target_ready_at > now - timedelta(minutes=1)
+            ).all()
+            
+            for order in upcoming_orders:
+                await notify_staff_new_order(order.id, order.store_id)
+    except Exception as e:
+        logger.error(f'Error in upcoming notifications: {e}')
